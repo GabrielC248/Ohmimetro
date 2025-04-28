@@ -1,19 +1,19 @@
 // ---------------- Bibliotecas - Início ----------------
 
-// Bibliotecas do C (Foi usada para debugging e cálculos)
-#include <stdio.h> // Biblioteca padrão de entrada e saída
-#include <math.h>  // Biblioteca para cálculos
+// Bibliotecas padrão do C (usadas para depuração e cálculos matemáticos)
+#include <stdio.h> // Funções de entrada e saída padrão
+#include <math.h>  // Funções matemáticas como powf, fabsf, etc.
 
 // Bibliotecas do pico SDK de mais alto nível
-#include "pico/stdlib.h"
+#include "pico/stdlib.h"     // Funcionalidades básicas do RP2040
 #include "pico/cyw43_arch.h"
-#include "pico/bootrom.h" // Para entrar no modo bootsel ao pressionar o botão B
+#include "pico/bootrom.h"    // Para entrar no modo bootsel ao pressionar o botão B
 
 // Bibliotecas do pico SDK de hardware
-#include "hardware/i2c.h"
-#include "hardware/pio.h"
-#include "hardware/adc.h"
-#include "hardware/clocks.h"
+#include "hardware/i2c.h"    // Comunicação I2C
+#include "hardware/pio.h"    // Controle da matriz de LEDs por PIO
+#include "hardware/adc.h"    // Conversor analógico-digital
+#include "hardware/clocks.h" // Controle dos clocks do sistema (PIO)
 
 #include "inc/ssd1306.h" // Header para controle do display OLED
 #include "inc/font.h"    // Header para a fonte do display OLED
@@ -34,14 +34,14 @@
 
 // Definições da matriz de LEDs
 #define NUM_PIXELS 25 // Número total de LEDs na matriz
-#define WS2812_PIN 7 // Pino da matriz de LEDs
+#define WS2812_PIN 7  // Pino da matriz de LEDs
 
 // Configuração do botão
 #define BUTTON_B 6 // Pino do botão B
 
 // Configuração para o ohmímetro
 #define ADC_PIN 28          // GPIO de leitura
-#define ADC_VREF 3.30f       // Tensão de referência do ADC
+#define ADC_VREF 3.30f      // Tensão de referência do ADC
 #define ADC_RESOLUTION 4095 // Resolução do ADC (12 bits)
 #define R_CONHECIDO 9920    // Resistor conhecido
 
@@ -54,16 +54,17 @@
 static volatile uint32_t last_time = 0; // Armazena o último tempo registrado nas interrupções
 
 // Variáveis da matriz de LEDs
-static volatile uint32_t leds[NUM_PIXELS]; // buffer para as cores dos 25 LEDs
+static volatile uint32_t leds[NUM_PIXELS]; // Buffer de cores para cada LED
 static PIO pio;     // Instância do PIO
-static uint sm;     // State machine para controle dos LEDs
-static uint offset; 
+static uint sm;     // State machine usada no PIO
+static uint offset; // Offset do programa no PIO
 
 // Struct para facilitar a escrita na matriz de LEDs
 typedef struct {
     uint8_t R, G, B;
 }Color;
 
+// Tabela de cores associadas aos dígitos do código de cores de resistores
 static const Color resistor_colors[10] = {
     {0, 0, 0},  // 0 - Preto
     {8, 1, 0},  // 1 - Marrom
@@ -77,6 +78,7 @@ static const Color resistor_colors[10] = {
     {8, 8, 8}   // 9 - Branco
 };
 
+// Tabela de nomes curtos das cores (para exibição no display)
 static const char *nome_cores[10] = {
     "pret", // 0 - Preto
     "marr", // 1 - Marrom
@@ -125,10 +127,12 @@ void init_button() {
 
 // -------- Matriz - Início --------
 
+// Envia a cor de um pixel para o PIO
 static inline void put_pixel(PIO pio, uint sm, uint32_t pixel_grb) {
     pio_sm_put_blocking(pio, sm, pixel_grb << 8u);
 }
 
+// Codifica cores RGB em formato 24 bits
  static inline uint32_t urgb_u32(uint8_t r, uint8_t g, uint8_t b) {
     return
             ((uint32_t) (r) << 8) |
@@ -136,26 +140,28 @@ static inline void put_pixel(PIO pio, uint sm, uint32_t pixel_grb) {
             (uint32_t) (b);
 }
 
-// Atualiza a cor de um LED na posição especificada
+// Define a cor de um LED da matriz
 void matrix_set_led(int index, uint8_t r, uint8_t g, uint8_t b) {
     if (index >= 0 && index < NUM_PIXELS) {
         leds[index] = urgb_u32(r, g, b);
     }
 }
 
+// Apaga todos os LEDs da matriz
 void matrix_clear_leds() {
     for (int i = 0; i < NUM_PIXELS; i++) {
         leds[i] = urgb_u32(0, 0, 0);
     }
 }
 
-// Atualiza toda a matriz enviando os pixels para o PIO
+// Atualiza os LEDs físicos com as cores do buffer
 void matrix_write(PIO pio, uint sm) {
     for (int i = 0; i < NUM_PIXELS; i++) {
         put_pixel(pio, sm, leds[i]);
     }
 }
 
+// Inicializa a matriz de LEDs
 void matrix_init() {
     bool success = pio_claim_free_sm_and_add_program_for_gpio_range(&ws2812_program, &pio, &sm, &offset, WS2812_PIN, 1, true);
     hard_assert(success);
@@ -171,9 +177,9 @@ void matrix_init() {
 
 
 
-// -------- Callback - Início --------
+// ---------------- Callback - Início ----------------
 
-// Função de callback para tratar as interrupções dos botões
+// Callback para tratar o botão B (reset para modo BOOTSEL)
 void gpio_irq_callback(uint gpio, uint32_t events) {
     uint32_t current_time = to_ms_since_boot(get_absolute_time()); // Obtém o tempo atual em ms
 
@@ -185,15 +191,20 @@ void gpio_irq_callback(uint gpio, uint32_t events) {
     }
 }
 
-// -------- Callback - Fim --------
+// ---------------- Callback - Fim ----------------
 
-// Função para calcular a resistência com base nos valores lidos do ADC do pino 28
+
+
+// ---------------- Funções do ohmímetro - Início ----------------
+
+// Lê a resistência desconhecida via ADC
 int ler_resistor(float *r_x, float *tensao) {
     float soma = 0.0f;
     int i;
 
     adc_select_input(2); // Seleciona o pino 28 como entrada ADC
 
+    // Faz 1000 leituras e calcula a média
     for(i=0;i<1000;i++) {
         soma += (float)adc_read();
         sleep_ms(1);
@@ -205,7 +216,7 @@ int ler_resistor(float *r_x, float *tensao) {
     return 0;
 }
 
-// Função para encontrar o resistor E24 mais próximo
+// Encontra o resistor da série E24 mais próximo do valor lido pelo ADC
 float resistor_e24(float resistencia_medida) {
     // Valores básicos da série E24
     const float e24_base[] = {
@@ -217,15 +228,18 @@ float resistor_e24(float resistencia_medida) {
     float melhor_resistor = 0.0f;
     float menor_erro = 1e9;
 
+    float decada_atual, candidato, erro;
+    int dec, i;
+
     // Encontrar a década do valor medido
     float decada = powf(10.0f, floorf(log10f(resistencia_medida)));
 
-    // Testar resistores da década atual e vizinhas (para bordas)
-    for (int dec = -1; dec <= 1; dec++) {
-        float decada_atual = decada * powf(10.0f, (float)dec);
-        for (int i = 0; i < n; i++) {
-            float candidato = e24_base[i] * decada_atual / 10.0f; // Dividimos por 10 porque e24_base começa em 10
-            float erro = fabsf(candidato - resistencia_medida);
+    // Verifica décadas próximas
+    for (dec = -1; dec <= 1; dec++) {
+        decada_atual = decada * powf(10.0f, (float)dec);
+        for (i = 0; i < n; i++) {
+            candidato = e24_base[i] * decada_atual / 10.0f;
+            erro = fabsf(candidato - resistencia_medida);
             if (erro < menor_erro) {
                 menor_erro = erro;
                 melhor_resistor = candidato;
@@ -236,10 +250,11 @@ float resistor_e24(float resistencia_medida) {
     return melhor_resistor;
 }
 
-void mostrar_resistor(float resistencia) {
-    int sig1 = 0, sig2 = 0, multiplicador = 0;
+// Atualiza os LEDs com as cores correspondentes da resistência e mostra as cores do resistor na matriz
+void mostrar_resistor_matriz(float resistencia) {
+    int sig1 = 0, sig2 = 0, multiplicador = 0, valor;
 
-    if (resistencia < 1) resistencia *= 1000; // transforma ohms fracionários em milivolts (ex: 0.22 Ohm vira 220 Ohm)
+    if (resistencia < 1) resistencia *= 1000; // Corrige valores pequenos
 
     // Normaliza para dois dígitos significativos
     while (resistencia >= 100) {
@@ -251,7 +266,7 @@ void mostrar_resistor(float resistencia) {
         multiplicador--;
     }
 
-    int valor = (int)(resistencia + 0.5); // Arredonda
+    valor = (int)(resistencia + 0.5); // Arredonda
     sig1 = valor / 10;
     sig2 = valor % 10;
 
@@ -259,17 +274,21 @@ void mostrar_resistor(float resistencia) {
     if (sig1 > 9) sig1 = 9;
     if (sig2 > 9) sig2 = 9;
     if (multiplicador < -2) multiplicador = -2; // Para resistores muito pequenos
-    if (multiplicador > 9) multiplicador = 9;    // Para resistores muito grandes
+    if (multiplicador > 9) multiplicador = 9;   // Para resistores muito grandes
 
-    // Atualiza LEDs 1, 2 e 3
+    // Debug
+    printf("Seg1: %d / Seg2: %d / Mult: %d\n",sig1,sig2,multiplicador);
+
+    // Atualiza LEDs 13, 12 e 11
     matrix_set_led(13,resistor_colors[sig1].R,resistor_colors[sig1].G,resistor_colors[sig1].B);
     matrix_set_led(12,resistor_colors[sig2].R,resistor_colors[sig2].G,resistor_colors[sig2].B);
     matrix_set_led(11,resistor_colors[multiplicador].R,resistor_colors[multiplicador].G,resistor_colors[multiplicador].B);
-    printf("Seg1: %d / Seg2: %d / Mult: %d\n",sig1,sig2,multiplicador);
-
-    matrix_write(pio,sm); // Atualiza os LEDs
+    
+    // Atualiza os LEDs
+    matrix_write(pio,sm);
 }
 
+// Obtém as cores correspondentes aos dígitos do resistor para exibição no OLED
 void obter_cores_resistor(float resistencia, char seg1[5], char seg2[5], char seg3[5]) {
     int sig1 = 0, sig2 = 0, multiplicador = 0;
 
@@ -306,6 +325,7 @@ void obter_cores_resistor(float resistencia, char seg1[5], char seg2[5], char se
     seg3[4] = '\0';
 }
 
+// Desenha representação gráfica do resistor no OLED e na matriz de LEDs
 void draw_resistors(ssd1306_t *ssd) {
     ssd1306_rect(ssd, 25, 11, 106, 10, true, false);
     ssd1306_hline(ssd,3,10,30,true);
@@ -326,58 +346,80 @@ void draw_resistors(ssd1306_t *ssd) {
     matrix_set_led(18,1,1,1);
 }
 
+// ---------------- Funções do ohmímetro - Fim ----------------
+
+
+
 int main() {
-    float r_x;     // Armazena o valor da resistência desconhecida
-    float tensao;  // Armazena o valor de tensão lido pelo ADC
-    float r_e24;   // Armazena o valor do resistor da série E24 mais próxima
-    char res[7];
-    char volt[6];
-    char seg1[5];
-    char seg2[5];
-    char seg3[5];
+    float r_x;     // Armazena o valor da resistência desconhecida lida
+    float tensao;  // Armazena o valor da tensão lida pelo ADC
+    float r_e24;   // Armazena o valor do resistor da série E24 mais próximo encontrado
+    char res[7];   // Buffer para armazenar a resistência formatada como string
+    char volt[6];  // Buffer para armazenar a tensão formatada como string
+    char seg1[5];  // Buffer para a primeira faixa de cor do resistor
+    char seg2[5];  // Buffer para a segunda faixa de cor do resistor
+    char seg3[5];  // Buffer para a terceira faixa de cor do resistor
     ssd1306_t ssd; // Estrutura que representa o display OLED
 
     stdio_init_all(); // Inicializa as entradas e saídas padrões
 
-    matrix_init();
+    matrix_init(); // Inicializa a matriz de LEDs
 
     init_display(&ssd); // Inicializa o display OLED
 
-    ssd1306_rect(&ssd, 0, 0, 128, 64, true, false); // Desenha a borda externa
+    // Desenha a borda do display
+    ssd1306_rect(&ssd, 0, 0, 128, 64, true, false);
+
+    // Desenha os rótulos "res:" e "volt:" no display
     ssd1306_draw_string(&ssd,"res:",18,43);
     ssd1306_draw_string(&ssd,"volt:",77,43);
+
+    // Desenha linhas verticais e horizontais para separar as áreas do display
     ssd1306_vline(&ssd,63,41,62,true);
     ssd1306_vline(&ssd,64,41,62,true);
     ssd1306_hline(&ssd,1,126,40,true);
     ssd1306_hline(&ssd,1,126,39,true);
-    draw_resistors(&ssd);
-    ssd1306_send_data(&ssd); // Envia os dados para escrever no display
 
-    adc_init(); // Inicializa o ADC
+    // Desenha a representação do resistor no display e na matriz de LEDs
+    draw_resistors(&ssd);
+
+    ssd1306_send_data(&ssd); // Envia os dados para escrever no display
+    matrix_write(pio, sm);   // Envia os dados para escrever na matriz
+
+    adc_init();             // Inicializa o ADC
     adc_gpio_init(ADC_PIN); // Inicializa o pino 28 como entrada analógica
 
-    init_button();  // Inicializa o botão B
+    init_button(); // Inicializa o botão B
 
     gpio_set_irq_enabled_with_callback(BUTTON_B, GPIO_IRQ_EDGE_FALL, true, &gpio_irq_callback); // Configura a interrupção para o botão B
 
     while (true) {
-        ler_resistor(&r_x,&tensao);
-        r_e24 = resistor_e24(r_x);
-        mostrar_resistor(r_e24);
-        printf("RESISTENCIA: %f/ TENSAO: %f/ Resistor: %f\n ",r_x,tensao,r_e24);
 
-        snprintf(res, sizeof(res), "%06d", (int)(r_x+0.5f));
-        snprintf(volt, sizeof(volt), "%05.3f", tensao);
+        ler_resistor(&r_x,&tensao); // Calcula a tensão no divisor e o valor do resistor desconhecido
+
+        r_e24 = resistor_e24(r_x); // Calcula o resistor mais próximo da série E24
+
+        printf("r_x: %f/ tensao: %f/ r_e24: %f\n ",r_x,tensao,r_e24); // Debug no terminal
+
+        mostrar_resistor_matriz(r_e24); // Mostra as cores do resistor E24 na matriz de LEDs
+
+        snprintf(res, sizeof(res), "%06d", (int)(r_x+0.5f)); // Formata a resistência como string e coloca no buffer
+        snprintf(volt, sizeof(volt), "%05.3f", tensao);      // Formata a tensão como string e coloca no buffer
+        
+        // Debug dos valores formatados
         printf("%s\n",res);
         printf("%s\n",volt);
 
-        ssd1306_draw_string(&ssd,res,8,53);
-        ssd1306_draw_string(&ssd,volt,76,53);
+        ssd1306_draw_string(&ssd,res,8,53);   // Escreve no display OLED o valor da resistência calculada
+        ssd1306_draw_string(&ssd,volt,76,53); // Escreve no display OLED o valor da tensão calculada
 
+        // Obtém as cores das faixas do resistor lido (r_x) e escreve no display
         obter_cores_resistor(r_x, seg1, seg2, seg3);
         ssd1306_draw_string(&ssd,seg1,10,4);
         ssd1306_draw_string(&ssd,seg2,49,4);
         ssd1306_draw_string(&ssd,seg3,88,4);
+
+        // Obtém as cores das faixas para o resistor E24 mais próximo e escreve no display
         obter_cores_resistor(r_e24, seg1, seg2, seg3);
         ssd1306_draw_string(&ssd,seg1,10,13);
         ssd1306_draw_string(&ssd,seg2,49,13);
