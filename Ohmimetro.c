@@ -1,13 +1,13 @@
 // ---------------- Bibliotecas - Início ----------------
 
-// Biblioteca padrão de entrada e saída do C (Foi usada para debugging)
-#include <stdio.h>
-#include <math.h>
+// Bibliotecas do C (Foi usada para debugging e cálculos)
+#include <stdio.h> // Biblioteca padrão de entrada e saída
+#include <math.h>  // Biblioteca para cálculos
 
 // Bibliotecas do pico SDK de mais alto nível
 #include "pico/stdlib.h"
 #include "pico/cyw43_arch.h"
-#include "pico/bootrom.h" // PARA TESTES
+#include "pico/bootrom.h" // Para entrar no modo bootsel ao pressionar o botão B
 
 // Bibliotecas do pico SDK de hardware
 #include "hardware/i2c.h"
@@ -33,16 +33,8 @@
 #define ADDRESS 0x3C  // Endereço do display
 
 // Definições da matriz de LEDs
-#define LED_COUNT 25  // Número total de LEDs na matriz
-#define MATRIX_PIN 7  // Pino da matriz de LEDs
-struct pixel_t {   // Estrutura para armazenar as cores de um LED WS2812
-  uint8_t G, R, B; // Componentes de cor (verde, vermelho e azul)
-};
-typedef struct pixel_t pixel_t;
-typedef pixel_t npLED_t;
-npLED_t leds[LED_COUNT];
-PIO np_pio; // Instância do PIO
-uint sm;    // State machine para controle dos LEDs
+#define NUM_PIXELS 25 // Número total de LEDs na matriz
+#define WS2812_PIN 7 // Pino da matriz de LEDs
 
 // Configuração do botão
 #define BUTTON_B 6 // Pino do botão B
@@ -53,21 +45,36 @@ uint sm;    // State machine para controle dos LEDs
 #define ADC_RESOLUTION 4095 // Resolução do ADC (12 bits)
 #define R_CONHECIDO 9920    // Resistor conhecido
 
+// ---------------- Definições - Fim ----------------
+
+
+
+// ---------------- Variáveis - Início ----------------
+
+static volatile uint32_t last_time = 0; // Armazena o último tempo registrado nas interrupções
+
+// Variáveis da matriz de LEDs
+static volatile uint32_t leds[NUM_PIXELS]; // buffer para as cores dos 25 LEDs
+static PIO pio;     // Instância do PIO
+static uint sm;     // State machine para controle dos LEDs
+static uint offset; 
+
+// Struct para facilitar a escrita na matriz de LEDs
 typedef struct {
     uint8_t R, G, B;
 }Color;
 
-Color resistor_colors[10] = {
-    {0, 0, 0},       // 0 - Preto
-    {188, 32, 0},    // 1 - Marrom
-    {188, 0, 0},     // 2 - Vermelho
-    {255, 200, 0},   // 3 - Laranja
-    {235, 230, 0},   // 4 - Amarelo
-    {0, 188, 0},     // 5 - Verde
-    {0, 0, 188},     // 6 - Azul
-    {130, 0, 240},   // 7 - Violeta 
-    {128, 128, 128}, // 8 - Cinza
-    {188, 188, 188}  // 9 - Branco
+static const Color resistor_colors[10] = {
+    {0, 0, 0},  // 0 - Preto
+    {8, 1, 0},  // 1 - Marrom
+    {8, 0, 0},  // 2 - Vermelho
+    {15, 3, 0}, // 3 - Laranja
+    {10, 4, 0}, // 4 - Amarelo
+    {0, 8, 0},  // 5 - Verde
+    {0, 0, 8},  // 6 - Azul
+    {6, 0, 6},  // 7 - Violeta 
+    {1, 1, 1},  // 8 - Cinza
+    {8, 8, 8}   // 9 - Branco
 };
 
 static const char *nome_cores[10] = {
@@ -82,14 +89,6 @@ static const char *nome_cores[10] = {
     "cinz", // 8 - Cinza
     "bran"  // 9 - Branco
 };
-
-// ---------------- Definições - Fim ----------------
-
-
-
-// ---------------- Variáveis - Início ----------------
-
-static volatile uint32_t last_time = 0; // Armazena o último tempo registrado nas interrupções
 
 // ---------------- Variáveis - Fim ----------------
 
@@ -126,66 +125,44 @@ void init_button() {
 
 // -------- Matriz - Início --------
 
-// Inicializa a máquina PIO para controle da matriz de LEDs
-void npInit(uint pin) {
+static inline void put_pixel(PIO pio, uint sm, uint32_t pixel_grb) {
+    pio_sm_put_blocking(pio, sm, pixel_grb << 8u);
+}
 
-    // Carrega o programa PIO para controle dos LEDs
-    uint offset = pio_add_program(pio0, &ws2812_program);
-    np_pio = pio0;
+ static inline uint32_t urgb_u32(uint8_t r, uint8_t g, uint8_t b) {
+    return
+            ((uint32_t) (r) << 8) |
+            ((uint32_t) (g) << 16) |
+            (uint32_t) (b);
+}
 
-    // Obtém uma máquina de estado PIO disponível
-    sm = pio_claim_unused_sm(np_pio, false);
-    if (sm < 0) {
-        np_pio = pio1;
-        sm = pio_claim_unused_sm(np_pio, true);
-    }
-
-    // Inicializa a máquina de estado com o WS2812.pio
-    ws2812_program_init(np_pio, sm, offset, pin, 800000.f);
-
-    // Limpa o buffer de pixels
-    for (uint i = 0; i < LED_COUNT; ++i) {
-        leds[i].R = 0;
-        leds[i].G = 0;
-        leds[i].B = 0;
+// Atualiza a cor de um LED na posição especificada
+void matrix_set_led(int index, uint8_t r, uint8_t g, uint8_t b) {
+    if (index >= 0 && index < NUM_PIXELS) {
+        leds[index] = urgb_u32(r, g, b);
     }
 }
 
-// Atribui uma cor RGB a um LED específico na matriz
-void npSetLED(const uint index, const uint8_t r, const uint8_t g, const uint8_t b) {
-    leds[index].R = r;
-    leds[index].G = g;
-    leds[index].B = b;
-}
-
-// Limpa todos os LEDs na matriz
-void npClear() {
-    for (uint i = 0; i < LED_COUNT; ++i) {
-        npSetLED(i, 0, 0, 0);
+void matrix_clear_leds() {
+    for (int i = 0; i < NUM_PIXELS; i++) {
+        leds[i] = urgb_u32(0, 0, 0);
     }
 }
 
-// Escreve os dados do buffer para os LEDs
-void npWrite() {
-    // Escreve cada dado de 8 bits dos pixels em sequência no buffer da máquina PIO
-    for (uint i = 0; i < LED_COUNT; ++i) {
-        pio_sm_put_blocking(np_pio, sm, leds[i].G);
-        pio_sm_put_blocking(np_pio, sm, leds[i].R);
-        pio_sm_put_blocking(np_pio, sm, leds[i].B);
+// Atualiza toda a matriz enviando os pixels para o PIO
+void matrix_write(PIO pio, uint sm) {
+    for (int i = 0; i < NUM_PIXELS; i++) {
+        put_pixel(pio, sm, leds[i]);
     }
-    sleep_us(100); // Espera 100us para o reset
 }
 
-// Função para facilitar o desenho na matriz utilizando 3 matrizes cos os valores RGB
-void npDraw(uint8_t vetorR[5][5], uint8_t vetorG[5][5], uint8_t vetorB[5][5]) {
-  int i, j,idx,col;
-    for (i = 0; i < 5; i++) {
-        idx = (4 - i) * 5; // Calcula o índice base para a linha
-        for (j = 0; j < 5; j++) {
-            col = (i % 2 == 0) ? (4 - j) : j; // Inverte a ordem das colunas nas linhas pares
-            npSetLED(idx + col, vetorR[i][j], vetorG[i][j], vetorB[i][j]); // Preenche o buffer com os valores das matrizes
-        }
-    }
+void matrix_init() {
+    bool success = pio_claim_free_sm_and_add_program_for_gpio_range(&ws2812_program, &pio, &sm, &offset, WS2812_PIN, 1, true);
+    hard_assert(success);
+
+    ws2812_program_init(pio, sm, offset, WS2812_PIN, 800000, false);
+    matrix_clear_leds();
+    matrix_write(pio,sm);
 }
 
 // -------- Matriz - Fim --------
@@ -285,21 +262,12 @@ void mostrar_resistor(float resistencia) {
     if (multiplicador > 9) multiplicador = 9;    // Para resistores muito grandes
 
     // Atualiza LEDs 1, 2 e 3
-    leds[3].R = resistor_colors[sig1].R;
-    leds[3].G = resistor_colors[sig1].G;
-    leds[3].B = resistor_colors[sig1].B;
-
-    leds[2].R = resistor_colors[sig2].R;
-    leds[2].G = resistor_colors[sig2].G;
-    leds[2].B = resistor_colors[sig2].B;
-
-    leds[1].R = resistor_colors[multiplicador].R;
-    leds[1].G = resistor_colors[multiplicador].G;
-    leds[1].B = resistor_colors[multiplicador].B;
-
+    matrix_set_led(13,resistor_colors[sig1].R,resistor_colors[sig1].G,resistor_colors[sig1].B);
+    matrix_set_led(12,resistor_colors[sig2].R,resistor_colors[sig2].G,resistor_colors[sig2].B);
+    matrix_set_led(11,resistor_colors[multiplicador].R,resistor_colors[multiplicador].G,resistor_colors[multiplicador].B);
     printf("Seg1: %d / Seg2: %d / Mult: %d\n",sig1,sig2,multiplicador);
 
-    npWrite(); // Atualiza os LEDs
+    matrix_write(pio,sm); // Atualiza os LEDs
 }
 
 void obter_cores_resistor(float resistencia, char seg1[5], char seg2[5], char seg3[5]) {
@@ -338,7 +306,7 @@ void obter_cores_resistor(float resistencia, char seg1[5], char seg2[5], char se
     seg3[4] = '\0';
 }
 
-void draw_resistor(ssd1306_t *ssd) {
+void draw_resistors(ssd1306_t *ssd) {
     ssd1306_rect(ssd, 25, 11, 106, 10, true, false);
     ssd1306_hline(ssd,3,10,30,true);
     ssd1306_hline(ssd,117,124,30,true);
@@ -348,6 +316,14 @@ void draw_resistor(ssd1306_t *ssd) {
     ssd1306_vline(ssd,64,26,33,true);
     ssd1306_vline(ssd,102,26,33,true);
     ssd1306_vline(ssd,103,26,33,true);
+    matrix_set_led(6,1,1,1);
+    matrix_set_led(7,1,1,1);
+    matrix_set_led(8,1,1,1);
+    matrix_set_led(10,1,1,1);
+    matrix_set_led(14,1,1,1);
+    matrix_set_led(16,1,1,1);
+    matrix_set_led(17,1,1,1);
+    matrix_set_led(18,1,1,1);
 }
 
 int main() {
@@ -363,6 +339,8 @@ int main() {
 
     stdio_init_all(); // Inicializa as entradas e saídas padrões
 
+    matrix_init();
+
     init_display(&ssd); // Inicializa o display OLED
 
     ssd1306_rect(&ssd, 0, 0, 128, 64, true, false); // Desenha a borda externa
@@ -372,12 +350,8 @@ int main() {
     ssd1306_vline(&ssd,64,41,62,true);
     ssd1306_hline(&ssd,1,126,40,true);
     ssd1306_hline(&ssd,1,126,39,true);
-    draw_resistor(&ssd);
+    draw_resistors(&ssd);
     ssd1306_send_data(&ssd); // Envia os dados para escrever no display
-
-    npInit(MATRIX_PIN); // Inicializa e limpa a matriz de LEDs
-    npClear();
-    npWrite();
 
     adc_init(); // Inicializa o ADC
     adc_gpio_init(ADC_PIN); // Inicializa o pino 28 como entrada analógica
@@ -410,6 +384,5 @@ int main() {
         ssd1306_draw_string(&ssd,seg3,88,13);
         
         ssd1306_send_data(&ssd); // Envia os dados para escrever no display
-        
     }
 }
