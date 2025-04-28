@@ -1,4 +1,4 @@
-# BitDogLab ColorOhm (Ohmímetro Visual)
+# BitDogLab ColorOhm (Ohmímetro Digital)
   - **Desenvolvedor:** <ins>Gabriel Cavalcanti Coelho</ins>;
   - **Matrícula:** TIC370101612;
   - **Vídeo:** [YouTube](https://youtu.be/9p0Zbqnn2fU).
